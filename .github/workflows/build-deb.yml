@@ -20,12 +20,19 @@ jobs:
         uses: uraimo/run-on-arch-action@v2
         with:
           arch: aarch64
-          distro: ubuntu22.04 # Replaced debian_latest with ubuntu22.04
+          distro: ubuntu22.04
+          # We added "set -ex" to print exact errors and "dos2unix" to fix line endings
           run: |
-            echo "Installing dependencies..."
+            set -ex
             export DEBIAN_FRONTEND=noninteractive
+            
+            echo "Installing dependencies..."
             apt-get update
-            apt-get install -y gcc python3-dev python3-pip cython3 dpkg-dev fakeroot
+            apt-get install -y gcc python3-dev python3-pip cython3 dpkg-dev fakeroot pkg-config dos2unix
+            
+            echo "Fixing script line endings (Windows CRLF to Linux LF)..."
+            dos2unix build_deb.sh
+            dos2unix wifibox_agent_collector.py
             
             echo "Running build script..."
             chmod +x build_deb.sh
