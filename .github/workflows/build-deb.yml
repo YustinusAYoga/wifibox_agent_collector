@@ -11,18 +11,18 @@ on:
       - main
 
 jobs:
-  build-armhf:
-    name: Build for ARMHF (32-bit Raspberry Pi)
+  build-arm64:
+    name: Build for ARM64 (Debian 12)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Build on ARMHF Emulator
+      - name: Build on ARM64 Emulator
         uses: uraimo/run-on-arch-action@v2
         with:
-          arch: armv7 # Targets 32-bit ARM (armhf)
-          distro: ubuntu22.04
+          arch: aarch64 # Targets 64-bit ARM
+          distro: bookworm # Targets Debian 12
           run: |
             set -ex
             export DEBIAN_FRONTEND=noninteractive
@@ -53,13 +53,13 @@ jobs:
       - name: Upload Debian Package Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wifibox-collector-armhf-deb
+          name: wifibox-collector-arm64-deb
           path: "*.deb"
           retention-days: 7
 
   publish-release:
     name: Publish to GitHub Releases
-    needs: build-armhf
+    needs: build-arm64
     if: startsWith(github.ref, 'refs/tags/v') # Only run this job if a tag was pushed
     runs-on: ubuntu-latest
     permissions:
@@ -68,7 +68,7 @@ jobs:
       - name: Download Build Artifact
         uses: actions/download-artifact@v4
         with:
-          name: wifibox-collector-armhf-deb
+          name: wifibox-collector-arm64-deb
           path: .
 
       - name: Create Release and Upload .deb
