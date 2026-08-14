@@ -1,0 +1,38 @@
+name: Build Cythonized Debian Package
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-arm64:
+    name: Build for ARM64 (Raspberry Pi)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Build on ARM64 Emulator
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          distro: debian_latest
+          run: |
+            echo "Installing dependencies..."
+            apt-get update
+            apt-get install -y gcc python3-dev python3-pip cython3 dpkg-dev fakeroot
+            
+            echo "Running build script..."
+            chmod +x build_deb.sh
+            ./build_deb.sh
+
+      - name: Upload Debian Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wifibox-collector-arm64-deb
+          path: "*.deb"
+          retention-days: 7
