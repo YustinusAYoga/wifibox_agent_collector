@@ -20,9 +20,10 @@ jobs:
         uses: uraimo/run-on-arch-action@v2
         with:
           arch: aarch64
-          distro: debian_latest
+          distro: ubuntu22.04 # Replaced debian_latest with ubuntu22.04
           run: |
             echo "Installing dependencies..."
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install -y gcc python3-dev python3-pip cython3 dpkg-dev fakeroot
             
