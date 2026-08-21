@@ -288,20 +288,29 @@ async def push_metrics(request: Request):
 
 # UPDATED ROUTE HERE: Using Query Parameters instead of Path Variables
 @app.post("/upload")
-async def upload_file(uid: str, filename: str, request: Request):
+async def upload_file(request: Request):
     """Handle raw binary file uploads securely mapped to UID via query parameters"""
     client_ip = request.client.host if request.client else "Unknown IP"
     
+    # 1. Extract parameters manually to bypass Cython/Pydantic signature crashes
+    uid = request.query_params.get("uid")
+    filename = request.query_params.get("filename")
+    
+    if not uid or not filename:
+        logger.warning(f"[{client_ip}] Missing uid or filename in query parameters.")
+        raise HTTPException(status_code=400, detail="Missing 'uid' or 'filename' query parameters.")
+    
     try:
-        safe_uid = os.path.basename(uid)
-        safe_filename = os.path.basename(filename)
+        # Sanitize inputs
+        safe_uid = os.path.basename(str(uid))
+        safe_filename = os.path.basename(str(filename))
 
         # Log the incoming request
         logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', File: '{safe_filename}'")
 
         target_dir = os.path.join(UPLOAD_DIR, safe_uid)
         
-        # 1. Catch Folder Permission Errors Specifically
+        # 2. Catch Folder Permission Errors Specifically
         try:
             os.makedirs(target_dir, exist_ok=True)
         except Exception as e:
@@ -310,19 +319,19 @@ async def upload_file(uid: str, filename: str, request: Request):
 
         filepath = os.path.join(target_dir, safe_filename)
 
-        # 2. Safely Read Body Payload
+        # 3. Safely Read Body Payload
         body = await request.body()
         if not body:
             logger.warning(f"[{client_ip}] Rejected empty upload payload for '{safe_uid}'")
             raise HTTPException(status_code=400, detail="No data provided. Ensure you are sending binary data.")
 
-        # 3. Save the File
+        # 4. Save the File
         with open(filepath, 'wb') as f:
             f.write(body)
         
         logger.info(f"[{client_ip}] Successfully saved '{safe_filename}' for UID '{safe_uid}' ({len(body)} bytes)")
 
-        # 4. Trigger Inventory Registration
+        # 5. Trigger Inventory Registration
         if safe_filename == "wifibox_identification.json":
             logger.info(f"[{client_ip}] Auto-registration triggered by '{safe_uid}'")
             update_inventory_file(filepath)
@@ -330,10 +339,8 @@ async def upload_file(uid: str, filename: str, request: Request):
         return {"message": f"File {safe_filename} uploaded to directory {safe_uid} successfully."}
         
     except HTTPException:
-        # Re-raise known HTTP exceptions so the client gets the correct status code
         raise 
     except Exception as e:
-        # Catch any other unexpected errors
         logger.error(f"[{client_ip}] Unexpected error during upload for UID '{uid}': {e}")
         raise HTTPException(status_code=500, detail=f"Unexpected Internal Server Error: {str(e)}")
 
