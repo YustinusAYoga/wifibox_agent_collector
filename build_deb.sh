@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# We removed the strict root check to allow GitHub Actions container builds
 set -e
 
 # Check for required build tools
@@ -21,11 +20,13 @@ if [ ! -f "wifibox_agent_collector.py" ]; then
 fi
 
 PKG_NAME="wifibox-collector"
-PKG_VERSION="1.0.6"
+PKG_VERSION="1.0.7"
 BUILD_DIR="./wifibox-collector-build"
 INSTALL_DIR="home/oldendome/wifibox-agent-collector"
 SERVICE_USER="oldendome"
-ARCH=$(dpkg --print-architecture)
+
+# FORCE THE ARCHITECTURE TO arm64
+ARCH="arm64"
 
 echo "[+] Cleaning previous build files..."
 rm -rf "$BUILD_DIR"
@@ -46,8 +47,8 @@ Priority: optional
 Architecture: ${ARCH}
 Depends: python3, python3-requests, python3-pip
 Maintainer: oldendome <admin@local>
-Description: Wifibox Fleet Collector and Push Receiver Service (Cythonized)
- Scrapes fleet metrics, manages push backlogs, and exposes endpoints for Prometheus and Grafana.
+Description: Wifibox Fleet Collector and Push Receiver Service (FastAPI & Cythonized)
+ Scrapes fleet metrics, manages file uploads, and exposes endpoints for Prometheus and Grafana.
 EOF
 
 echo "[+] Writing post-installation script..."
@@ -57,10 +58,8 @@ set -e
 SERVICE_USER="${SERVICE_USER}"
 INSTALL_DIR="/${INSTALL_DIR}"
 
-echo "[+] Ensuring python3-prometheus-client is installed..."
-if ! python3 -c "import prometheus_client" &>/dev/null; then
-    pip3 install prometheus-client fastapi uvicorn --break-system-packages || pip3 install prometheus-client fastapi uvicorn
-fi
+echo "[+] Ensuring required Python packages are installed (FastAPI, Uvicorn, Prometheus-Client)..."
+pip3 install prometheus-client fastapi uvicorn --break-system-packages || pip3 install prometheus-client fastapi uvicorn
 
 echo "[+] Setting up file permissions..."
 if id "\$SERVICE_USER" &>/dev/null; then
