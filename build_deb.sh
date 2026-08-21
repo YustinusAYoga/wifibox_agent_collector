@@ -59,7 +59,7 @@ INSTALL_DIR="/${INSTALL_DIR}"
 
 echo "[+] Ensuring python3-prometheus-client is installed..."
 if ! python3 -c "import prometheus_client" &>/dev/null; then
-    pip3 install prometheus-client --break-system-packages || pip3 install prometheus-client
+    pip3 install prometheus-client fastapi uvicorn --break-system-packages || pip3 install prometheus-client fastapi uvicorn
 fi
 
 echo "[+] Setting up file permissions..."
