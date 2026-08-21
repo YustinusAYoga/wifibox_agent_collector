@@ -286,9 +286,10 @@ async def push_metrics(request: Request):
         logger.error(f"Failed to process pushed metrics: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
+# UPDATED ROUTE HERE: Using Query Parameters instead of Path Variables
 @app.post("/upload")
 async def upload_file(uid: str, filename: str, request: Request):
-    """Handle raw binary file uploads securely mapped to UID"""
+    """Handle raw binary file uploads securely mapped to UID via query parameters"""
     safe_uid = os.path.basename(uid)
     safe_filename = os.path.basename(filename)
     client_ip = request.client.host if request.client else "Unknown IP"
