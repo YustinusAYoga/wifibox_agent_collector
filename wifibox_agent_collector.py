@@ -292,46 +292,43 @@ async def upload_file(request: Request):
     """Handle raw binary file uploads securely mapped to UID via query parameters"""
     client_ip = request.client.host if request.client else "Unknown IP"
     
-    # 1. Extract parameters manually to bypass Cython/Pydantic signature crashes
-    uid = request.query_params.get("uid")
-    filename = request.query_params.get("filename")
+    # Extract query parameters directly from the ASGI scope
+    query_params = request.query_params
+    uid = query_params.get("uid")
+    filename = query_params.get("filename")
     
     if not uid or not filename:
         logger.warning(f"[{client_ip}] Missing uid or filename in query parameters.")
         raise HTTPException(status_code=400, detail="Missing 'uid' or 'filename' query parameters.")
     
     try:
-        # Sanitize inputs
         safe_uid = os.path.basename(str(uid))
         safe_filename = os.path.basename(str(filename))
 
-        # Log the incoming request
         logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', File: '{safe_filename}'")
 
         target_dir = os.path.join(UPLOAD_DIR, safe_uid)
         
-        # 2. Catch Folder Permission Errors Specifically
         try:
             os.makedirs(target_dir, exist_ok=True)
         except Exception as e:
-            logger.error(f"[{client_ip}] Failed to create directory '{target_dir}'. Permission denied? Error: {e}")
-            raise HTTPException(status_code=500, detail=f"Server Folder Error: Cannot create target directory. {str(e)}")
+            logger.error(f"[{client_ip}] Failed to create directory '{target_dir}': {e}")
+            raise HTTPException(status_code=500, detail=f"Server Folder Error: {str(e)}")
 
         filepath = os.path.join(target_dir, safe_filename)
 
-        # 3. Safely Read Body Payload
+        # Asynchronously read the body payload
         body = await request.body()
         if not body:
             logger.warning(f"[{client_ip}] Rejected empty upload payload for '{safe_uid}'")
-            raise HTTPException(status_code=400, detail="No data provided. Ensure you are sending binary data.")
+            raise HTTPException(status_code=400, detail="No data provided.")
 
-        # 4. Save the File
+        # Write file contents synchronously inside the async handler
         with open(filepath, 'wb') as f:
             f.write(body)
         
         logger.info(f"[{client_ip}] Successfully saved '{safe_filename}' for UID '{safe_uid}' ({len(body)} bytes)")
 
-        # 5. Trigger Inventory Registration
         if safe_filename == "wifibox_identification.json":
             logger.info(f"[{client_ip}] Auto-registration triggered by '{safe_uid}'")
             update_inventory_file(filepath)
