@@ -20,7 +20,7 @@ if [ ! -f "wifibox_agent_collector.py" ]; then
 fi
 
 PKG_NAME="wifibox-collector"
-PKG_VERSION="1.0.7"
+PKG_VERSION="1.0.8"
 BUILD_DIR="./wifibox-collector-build"
 INSTALL_DIR="home/oldendome/wifibox-agent-collector"
 SERVICE_USER="oldendome"
@@ -57,13 +57,23 @@ cat << EOF > "$BUILD_DIR/DEBIAN/postinst"
 set -e
 SERVICE_USER="${SERVICE_USER}"
 INSTALL_DIR="/${INSTALL_DIR}"
+UPLOAD_DIR="/home/oldendome/wifibox-agent/data"
 
 echo "[+] Ensuring required Python packages are installed (FastAPI, Uvicorn, Prometheus-Client)..."
 pip3 install prometheus-client fastapi uvicorn --break-system-packages || pip3 install prometheus-client fastapi uvicorn
 
-echo "[+] Setting up file permissions..."
+echo "[+] Creating required data directories on target machine..."
+mkdir -p "\$INSTALL_DIR/data"
+mkdir -p "\$INSTALL_DIR/pushed_backlogs"
+mkdir -p "\$UPLOAD_DIR"
+
+echo "[+] Setting up file permissions for the service user..."
 if id "\$SERVICE_USER" &>/dev/null; then
+    # Give ownership of the collector directory
     chown -R "\$SERVICE_USER:\$SERVICE_USER" "\$INSTALL_DIR"
+    
+    # Give ownership of the upload directory (this fixes the HTTP 500 error)
+    chown -R "\$SERVICE_USER:\$SERVICE_USER" "/home/oldendome/wifibox-agent"
 fi
 
 chmod +x "\$INSTALL_DIR/wifibox-agent-collector"
