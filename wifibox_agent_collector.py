@@ -7,8 +7,14 @@ import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
+
+# FastAPI & Uvicorn imports
+from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.responses import FileResponse
+import uvicorn
+
+# Prometheus imports
 from prometheus_client import generate_latest, Gauge, Counter, Info, CONTENT_TYPE_LATEST
 
 # --- Aggregated Collector Metrics ---
@@ -34,22 +40,16 @@ METRIC_GAUGES = {
     'wifibox_ip_forward_enabled': Gauge('wifibox_remote_ip_forward_enabled', 'Mirrored ip forward status', ['uid', 'site', 'mode']),
     'wifibox_nat_masquerade_ok': Gauge('wifibox_remote_nat_masquerade_ok', 'Mirrored nat masquerade status', ['uid', 'site', 'mode']),
     'wifibox_connected_devices': Gauge('wifibox_remote_connected_devices', 'Mirrored connected devices count', ['uid', 'site', 'mode']),
-    
-    # DHCP Metrics
     'wifibox_dhcp_service_up': Gauge('wifibox_remote_dhcp_service_up', 'Mirrored dhcp service status', ['uid', 'site', 'mode']),
     'wifibox_dhcp_range_ok': Gauge('wifibox_remote_dhcp_range_ok', 'Mirrored dhcp range ok', ['uid', 'site', 'mode']),
     'wifibox_dhcp_active_leases': Gauge('wifibox_remote_dhcp_active_leases', 'Mirrored active leases count', ['uid', 'site', 'mode']),
     'wifibox_dhcp_lease_file_present': Gauge('wifibox_remote_dhcp_lease_file_present', 'Mirrored dhcp lease file presence', ['uid', 'site', 'mode']),
-    
-    # Check & Config Metrics
     'wifibox_wg_systemd_up': Gauge('wifibox_remote_wg_systemd_up', 'Mirrored wg systemd status', ['uid', 'site', 'mode']),
     'wifibox_config_runtime_mismatch': Gauge('wifibox_remote_config_runtime_mismatch', 'Mirrored config mismatch', ['uid', 'site', 'mode']),
     'wifibox_wifi_connected': Gauge('wifibox_remote_wifi_connected', 'Mirrored wifi connection status', ['uid', 'site', 'mode']),
     'wifibox_wifi_signal_percent': Gauge('wifibox_remote_wifi_signal_percent', 'Mirrored wifi signal percent', ['uid', 'site', 'mode']),
     'wifibox_check_success': Gauge('wifibox_remote_check_success', 'Mirrored check success', ['uid', 'site', 'mode']),
     'wifibox_last_check_timestamp_seconds': Gauge('wifibox_remote_last_check_timestamp_seconds', 'Mirrored last check timestamp', ['uid', 'site', 'mode']),
-    
-    # Hardware Health Metrics
     'wifibox_cpu_usage_percent': Gauge('wifibox_remote_cpu_usage_percent', 'Mirrored CPU usage percent', ['uid', 'site', 'mode']),
     'wifibox_cpu_temp_celsius': Gauge('wifibox_remote_cpu_temp_celsius', 'Mirrored CPU temp celsius', ['uid', 'site', 'mode']),
     'wifibox_memory_total_bytes': Gauge('wifibox_remote_memory_total_bytes', 'Mirrored memory total', ['uid', 'site', 'mode']),
@@ -72,6 +72,8 @@ CSV_FILE_PATH = "/home/oldendome/wifibox-agent-collector/data/collected-meteric-
 PUSHED_DATA_DIR = "/home/oldendome/wifibox-agent-collector/pushed_backlogs"
 INVENTORY_FILE_PATH = "/home/oldendome/wifibox-agent-collector/wifibox_inventory.json"
 UPLOAD_DIR = "/home/oldendome/wifibox-agent/data"
+
+app = FastAPI(title="Wifibox Fleet Collector API")
 
 def init_storage():
     os.makedirs(os.path.dirname(CSV_FILE_PATH), exist_ok=True)
@@ -96,9 +98,7 @@ def append_to_csv(rows):
 def load_targets_from_json(filepath=INVENTORY_FILE_PATH):
     targets = {}
     if not os.path.exists(filepath):
-        print(f"Warning: {filepath} not found! Using fallback empty target list.")
         return targets
-
     try:
         with open(filepath, 'r') as f:
             data = json.load(f)
@@ -107,7 +107,6 @@ def load_targets_from_json(filepath=INVENTORY_FILE_PATH):
                 ip = item.get("wg_ip")
                 site = item.get("site", "unknown")
                 mode = item.get("mode", "unknown")
-                
                 if uid and ip:
                     targets[uid] = {
                         "ip": ip,
@@ -117,7 +116,6 @@ def load_targets_from_json(filepath=INVENTORY_FILE_PATH):
                     }
     except json.JSONDecodeError as e:
         print(f"Error parsing JSON from {filepath}: {e}")
-        
     return targets
 
 def scrape_single_agent(uid, info):
@@ -134,7 +132,6 @@ def scrape_single_agent(uid, info):
         if response.status_code == 200:
             COLLECTOR_UP.labels(uid=uid, site=site, mode=mode).set(1)
             local_rows.append(["wifibox_collector_target_up", 1, ip, site, collected_time])
-            
             parsed_metrics = parse_and_update_metrics(uid, site, mode, response.text, ip, collected_time)
             local_rows.extend(parsed_metrics)
         else:
@@ -148,10 +145,12 @@ def handle_scrape_failure(uid, site, mode, ip, collected_time, local_rows):
     COLLECTOR_UP.labels(uid=uid, site=site, mode=mode).set(0)
     SCRAPE_ERRORS_TOTAL.labels(uid=uid, site=site, mode=mode).inc()
     
-    local_rows.append(["wifibox_collector_target_up", 0, ip, site, collected_time])
-    local_rows.append(["wifibox_internet_up", 0, ip, site, collected_time])
-    local_rows.append(["wifibox_vpn_up", 0, ip, site, collected_time])
-    local_rows.append(["wifibox_tailscale_up", 0, ip, site, collected_time])
+    local_rows.extend([
+        ["wifibox_collector_target_up", 0, ip, site, collected_time],
+        ["wifibox_internet_up", 0, ip, site, collected_time],
+        ["wifibox_vpn_up", 0, ip, site, collected_time],
+        ["wifibox_tailscale_up", 0, ip, site, collected_time]
+    ])
 
 def parse_and_update_metrics(uid, site, mode, text_data, ip, collected_time):
     rows = []
@@ -159,9 +158,6 @@ def parse_and_update_metrics(uid, site, mode, text_data, ip, collected_time):
         if line.startswith('#') or not line.strip():
             continue
             
-        # Parse standard Prometheus exposition format:
-        # Example 1: wifibox_internet_up 1.0
-        # Example 2 (Info string): wifibox_wifi_ssid_info{wifibox_wifi_ssid="MySSID"} 1.0
         match = re.match(r'^([a-zA-Z_0-9]+)(?:\{([^}]*)\})?\s+(.+)$', line.strip())
         if not match:
             continue
@@ -173,21 +169,17 @@ def parse_and_update_metrics(uid, site, mode, text_data, ip, collected_time):
         except ValueError:
             continue
             
-        # 1. Update Numeric Gauges
         if metric_raw_name in METRIC_GAUGES:
             METRIC_GAUGES[metric_raw_name].labels(uid=uid, site=site, mode=mode).set(metric_value)
             rows.append([metric_raw_name, metric_value, ip, site, collected_time])
             
-        # 2. Update String Info Metrics (Prometheus client suffixes Info names with '_info')
         elif metric_raw_name.endswith('_info'):
             base_name = metric_raw_name[:-5]
             if base_name in METRIC_INFO and labels_str:
-                # Extract the actual string value from the label (e.g. wifibox_wifi_ssid="MySSID")
                 label_match = re.search(f'{base_name}="([^"]*)"', labels_str)
                 if label_match:
                     info_val = label_match.group(1)
                     METRIC_INFO[base_name].labels(uid=uid, site=site, mode=mode).info({base_name: info_val})
-                    # Save the actual text string to CSV instead of the dummy 1.0 value
                     rows.append([base_name, info_val, ip, site, collected_time])
 
     return rows
@@ -230,107 +222,8 @@ def update_inventory_file(uploaded_file_path):
     except Exception as e:
         print(f"[-] Failed to parse and update inventory: {e}")
 
-class CollectorHTTPHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/metrics':
-            output = generate_latest()
-            self.send_response(200)
-            self.send_header('Content-Type', CONTENT_TYPE_LATEST)
-            self.end_headers()
-            self.wfile.write(output)
-        elif self.path == '/csv' or self.path == '/collected-meteric-data.csv':
-            if os.path.exists(CSV_FILE_PATH):
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/csv')
-                self.end_headers()
-                with open(CSV_FILE_PATH, 'rb') as f:
-                    self.wfile.write(f.read())
-            else:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"CSV file not found")
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not Found")
-
-    def do_POST(self):
-        if self.path.startswith('/metrics/job/'):
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            backup_file = os.path.join(PUSHED_DATA_DIR, f"pushed_{timestamp_str}.txt")
-            try:
-                with open(backup_file, 'wb') as f:
-                    f.write(post_data)
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"OK")
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(b"Internal Server Error")
-                
-        elif self.path.startswith('/upload/'):
-            parts = self.path.split('/')
-            if len(parts) >= 4:
-                uid = os.path.basename(parts[2])
-                filename = os.path.basename(parts[3])
-            else:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"Invalid route. Use /upload/<uid>/<filename>\n")
-                return
-
-            target_dir = os.path.join(UPLOAD_DIR, uid)
-            os.makedirs(target_dir, exist_ok=True)
-            
-            filepath = os.path.join(target_dir, filename)
-            content_length = int(self.headers.get('Content-Length', 0))
-            
-            if content_length > 0:
-                file_data = self.rfile.read(content_length)
-                try:
-                    with open(filepath, 'wb') as f:
-                        f.write(file_data)
-                    
-                    if filename == "wifibox_identification.json":
-                        update_inventory_file(filepath)
-                        
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(f"File {filename} uploaded to directory {uid} successfully.\n".encode())
-                except Exception as e:
-                    self.send_response(500)
-                    self.end_headers()
-                    self.wfile.write(f"Internal Server Error: {e}\n".encode())
-            else:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"No data provided. Ensure you are sending binary data.\n")
-                
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not Found")
-
-    def log_message(self, format, *args):
-        return
-
-def run_http_server(port):
-    server = HTTPServer(('0.0.0.0', port), CollectorHTTPHandler)
-    server.serve_forever()
-
-def main():
-    collector_port = 9102
-    init_storage()
-    os.chdir("/home/oldendome/wifibox-agent-collector")
-
-    server_thread = threading.Thread(target=run_http_server, args=(collector_port,), daemon=True)
-    server_thread.start()
-    print(f"Wifibox Fleet Collector & Server running on http://0.0.0.0:{collector_port}")
-
+# --- Background Scraper Loop ---
+def background_scraper():
     while True:
         start_time = time.time()
         all_new_rows = []
@@ -355,5 +248,75 @@ def main():
         sleep_duration = max(1.0, 60.0 - elapsed)
         time.sleep(sleep_duration)
 
+
+# --- FastAPI Endpoints ---
+
+@app.get("/metrics")
+def get_metrics():
+    """Expose metrics to Prometheus"""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+@app.get("/csv")
+@app.get("/collected-meteric-data.csv")
+def get_csv():
+    """Download the generated CSV file"""
+    if os.path.exists(CSV_FILE_PATH):
+        return FileResponse(CSV_FILE_PATH, media_type='text/csv', filename="collected-meteric-data.csv")
+    raise HTTPException(status_code=404, detail="CSV file not found")
+
+@app.post("/metrics/job/{path:path}")
+async def push_metrics(request: Request):
+    """Handle Prometheus push metrics"""
+    body = await request.body()
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup_file = os.path.join(PUSHED_DATA_DIR, f"pushed_{timestamp_str}.txt")
+    try:
+        with open(backup_file, 'wb') as f:
+            f.write(body)
+        return {"status": "OK"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+@app.post("/upload/{uid}/{filename}")
+async def upload_file(uid: str, filename: str, request: Request):
+    """Handle raw binary file uploads securely mapped to UID"""
+    safe_uid = os.path.basename(uid)
+    safe_filename = os.path.basename(filename)
+
+    target_dir = os.path.join(UPLOAD_DIR, safe_uid)
+    os.makedirs(target_dir, exist_ok=True)
+    filepath = os.path.join(target_dir, safe_filename)
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="No data provided. Ensure you are sending binary data.")
+
+    try:
+        with open(filepath, 'wb') as f:
+            f.write(body)
+        
+        # If this is an identification file, trigger the inventory update
+        if safe_filename == "wifibox_identification.json":
+            update_inventory_file(filepath)
+
+        return {"message": f"File {safe_filename} uploaded to directory {safe_uid} successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+
 if __name__ == '__main__':
-    main()
+    init_storage()
+    
+    # Change working directory if needed, ignoring errors if running directly elsewhere
+    try:
+        os.chdir("/home/oldendome/wifibox-agent-collector")
+    except FileNotFoundError:
+        pass 
+
+    # Start the background scraping task in a daemon thread
+    scraper_thread = threading.Thread(target=background_scraper, daemon=True)
+    scraper_thread.start()
+
+    # Start the FastAPI server on the main thread
+    print("Wifibox Fleet Collector & Server starting on 0.0.0.0:9102")
+    uvicorn.run(app, host="0.0.0.0", port=9102, log_level="info")
