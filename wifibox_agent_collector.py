@@ -290,37 +290,52 @@ async def push_metrics(request: Request):
 @app.post("/upload")
 async def upload_file(uid: str, filename: str, request: Request):
     """Handle raw binary file uploads securely mapped to UID via query parameters"""
-    safe_uid = os.path.basename(uid)
-    safe_filename = os.path.basename(filename)
     client_ip = request.client.host if request.client else "Unknown IP"
-
-    # Log the incoming request
-    logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', File: '{safe_filename}'")
-
-    target_dir = os.path.join(UPLOAD_DIR, safe_uid)
-    os.makedirs(target_dir, exist_ok=True)
-    filepath = os.path.join(target_dir, safe_filename)
-
-    body = await request.body()
-    if not body:
-        logger.warning(f"[{client_ip}] Rejected empty upload payload for '{safe_uid}'")
-        raise HTTPException(status_code=400, detail="No data provided. Ensure you are sending binary data.")
-
+    
     try:
+        safe_uid = os.path.basename(uid)
+        safe_filename = os.path.basename(filename)
+
+        # Log the incoming request
+        logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', File: '{safe_filename}'")
+
+        target_dir = os.path.join(UPLOAD_DIR, safe_uid)
+        
+        # 1. Catch Folder Permission Errors Specifically
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception as e:
+            logger.error(f"[{client_ip}] Failed to create directory '{target_dir}'. Permission denied? Error: {e}")
+            raise HTTPException(status_code=500, detail=f"Server Folder Error: Cannot create target directory. {str(e)}")
+
+        filepath = os.path.join(target_dir, safe_filename)
+
+        # 2. Safely Read Body Payload
+        body = await request.body()
+        if not body:
+            logger.warning(f"[{client_ip}] Rejected empty upload payload for '{safe_uid}'")
+            raise HTTPException(status_code=400, detail="No data provided. Ensure you are sending binary data.")
+
+        # 3. Save the File
         with open(filepath, 'wb') as f:
             f.write(body)
         
         logger.info(f"[{client_ip}] Successfully saved '{safe_filename}' for UID '{safe_uid}' ({len(body)} bytes)")
 
-        # If this is an identification file, trigger the inventory update
+        # 4. Trigger Inventory Registration
         if safe_filename == "wifibox_identification.json":
             logger.info(f"[{client_ip}] Auto-registration triggered by '{safe_uid}'")
             update_inventory_file(filepath)
 
         return {"message": f"File {safe_filename} uploaded to directory {safe_uid} successfully."}
+        
+    except HTTPException:
+        # Re-raise known HTTP exceptions so the client gets the correct status code
+        raise 
     except Exception as e:
-        logger.error(f"[{client_ip}] Failed to save file '{safe_filename}' for UID '{safe_uid}': {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+        # Catch any other unexpected errors
+        logger.error(f"[{client_ip}] Unexpected error during upload for UID '{uid}': {e}")
+        raise HTTPException(status_code=500, detail=f"Unexpected Internal Server Error: {str(e)}")
 
 
 if __name__ == '__main__':
