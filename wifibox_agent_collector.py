@@ -286,7 +286,7 @@ async def push_metrics(request: Request):
         logger.error(f"Failed to process pushed metrics: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
-@app.post("/upload/{uid}/{filename}")
+@app.post("/upload")
 async def upload_file(uid: str, filename: str, request: Request):
     """Handle raw binary file uploads securely mapped to UID"""
     safe_uid = os.path.basename(uid)
