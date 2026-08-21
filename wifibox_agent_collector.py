@@ -4,6 +4,7 @@ import os
 import json
 import csv
 import re
+import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -16,6 +17,13 @@ import uvicorn
 
 # Prometheus imports
 from prometheus_client import generate_latest, Gauge, Counter, Info, CONTENT_TYPE_LATEST
+
+# --- Configure Logging for systemd/journalctl ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger("wifibox-collector")
 
 # --- Aggregated Collector Metrics ---
 COLLECTOR_UP = Gauge(
@@ -93,7 +101,7 @@ def append_to_csv(rows):
             for row in rows:
                 writer.writerow(row)
     except Exception as e:
-        print(f"Error writing to CSV: {e}")
+        logger.error(f"Error writing to CSV: {e}")
 
 def load_targets_from_json(filepath=INVENTORY_FILE_PATH):
     targets = {}
@@ -115,7 +123,7 @@ def load_targets_from_json(filepath=INVENTORY_FILE_PATH):
                         "mode": mode
                     }
     except json.JSONDecodeError as e:
-        print(f"Error parsing JSON from {filepath}: {e}")
+        logger.error(f"Error parsing JSON from {filepath}: {e}")
     return targets
 
 def scrape_single_agent(uid, info):
@@ -217,10 +225,10 @@ def update_inventory_file(uploaded_file_path):
         with open(tmp_path, 'w') as f:
             json.dump(inventory, f, indent=2)
         os.replace(tmp_path, INVENTORY_FILE_PATH)
-        print(f"[+] Successfully updated inventory with data from {uploaded_file_path}")
+        logger.info(f"Successfully updated inventory with data from {uploaded_file_path}")
 
     except Exception as e:
-        print(f"[-] Failed to parse and update inventory: {e}")
+        logger.error(f"Failed to parse and update inventory: {e}")
 
 # --- Background Scraper Loop ---
 def background_scraper():
@@ -275,6 +283,7 @@ async def push_metrics(request: Request):
             f.write(body)
         return {"status": "OK"}
     except Exception as e:
+        logger.error(f"Failed to process pushed metrics: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 @app.post("/upload/{uid}/{filename}")
@@ -282,6 +291,10 @@ async def upload_file(uid: str, filename: str, request: Request):
     """Handle raw binary file uploads securely mapped to UID"""
     safe_uid = os.path.basename(uid)
     safe_filename = os.path.basename(filename)
+    client_ip = request.client.host if request.client else "Unknown IP"
+
+    # Log the incoming request
+    logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', File: '{safe_filename}'")
 
     target_dir = os.path.join(UPLOAD_DIR, safe_uid)
     os.makedirs(target_dir, exist_ok=True)
@@ -289,18 +302,23 @@ async def upload_file(uid: str, filename: str, request: Request):
 
     body = await request.body()
     if not body:
+        logger.warning(f"[{client_ip}] Rejected empty upload payload for '{safe_uid}'")
         raise HTTPException(status_code=400, detail="No data provided. Ensure you are sending binary data.")
 
     try:
         with open(filepath, 'wb') as f:
             f.write(body)
         
+        logger.info(f"[{client_ip}] Successfully saved '{safe_filename}' for UID '{safe_uid}' ({len(body)} bytes)")
+
         # If this is an identification file, trigger the inventory update
         if safe_filename == "wifibox_identification.json":
+            logger.info(f"[{client_ip}] Auto-registration triggered by '{safe_uid}'")
             update_inventory_file(filepath)
 
         return {"message": f"File {safe_filename} uploaded to directory {safe_uid} successfully."}
     except Exception as e:
+        logger.error(f"[{client_ip}] Failed to save file '{safe_filename}' for UID '{safe_uid}': {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
@@ -318,5 +336,5 @@ if __name__ == '__main__':
     scraper_thread.start()
 
     # Start the FastAPI server on the main thread
-    print("Wifibox Fleet Collector & Server starting on 0.0.0.0:9102")
+    logger.info("Wifibox Fleet Collector & Server starting on 0.0.0.0:9102")
     uvicorn.run(app, host="0.0.0.0", port=9102, log_level="info")
