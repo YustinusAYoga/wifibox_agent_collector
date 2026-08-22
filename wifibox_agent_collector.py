@@ -9,10 +9,11 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import threading
+from urllib.parse import parse_qs
 
 # FastAPI & Uvicorn imports
 from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 
 # Prometheus imports
@@ -286,23 +287,26 @@ async def push_metrics(request: Request):
         logger.error(f"Failed to process pushed metrics: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
-@app.post("/upload")
-async def upload_file(request: Request):
-    """Handle upload via query parameters, avoiding Pydantic/Cython signature inspection bugs"""
+# --- Raw ASGI Route Handler (Bypasses FastAPI/Pydantic/Cython Signature Inspection) ---
+async def raw_upload_endpoint(request: Request):
     client_ip = request.client.host if request.client else "Unknown IP"
     
-    uid = request.query_params.get("uid")
-    ip = request.query_params.get("ip")
-    
-    if not uid or not ip:
-        logger.warning(f"[{client_ip}] Missing 'uid' or 'ip' query parameters.")
-        raise HTTPException(status_code=400, detail="Missing 'uid' or 'ip' query parameters.")
-    
-    logger.info(f"[{client_ip}] Incoming upload request - UID: '{uid}', IP: '{ip}'")
-    
     try:
+        query_params = parse_qs(request.scope.get("query_string", b"").decode("utf-8"))
+        uid_vals = query_params.get("uid", [])
+        ip_vals = query_params.get("ip", [])
+        
+        uid = uid_vals[0] if uid_vals else None
+        ip = ip_vals[0] if ip_vals else None
+        
+        if not uid or not ip:
+            logger.warning(f"[{client_ip}] Missing 'uid' or 'ip' query parameters.")
+            return JSONResponse({"detail": "Missing 'uid' or 'ip' query parameters."}, status_code=400)
+        
         safe_uid = os.path.basename(str(uid))
         safe_ip = str(ip).strip()
+
+        logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', IP: '{safe_ip}'")
 
         target_dir = os.path.join(UPLOAD_DIR, safe_uid)
         
@@ -310,7 +314,7 @@ async def upload_file(request: Request):
             os.makedirs(target_dir, exist_ok=True)
         except Exception as e:
             logger.error(f"[{client_ip}] Failed to create directory '{target_dir}': {e}")
-            raise HTTPException(status_code=500, detail=f"Server Folder Error: {str(e)}")
+            return JSONResponse({"detail": f"Server Folder Error: {str(e)}"}, status_code=500)
 
         filepath = os.path.join(target_dir, "wifibox_identification.json")
 
@@ -328,16 +332,17 @@ async def upload_file(request: Request):
 
         update_inventory_file(filepath)
 
-        return {
+        return JSONResponse({
             "status": "success",
             "message": f"Identification file created and inventory updated for UID {safe_uid}."
-        }
+        })
         
-    except HTTPException:
-        raise 
     except Exception as e:
-        logger.error(f"[{client_ip}] Unexpected error during upload for UID '{uid}': {e}")
-        raise HTTPException(status_code=500, detail=f"Unexpected Internal Server Error: {str(e)}")
+        logger.error(f"[{client_ip}] Unexpected error during upload: {e}")
+        return JSONResponse({"detail": f"Unexpected Internal Server Error: {str(e)}"}, status_code=500)
+
+# Register as a raw Starlette route to avoid any FastAPI dependency inspector overhead
+app.add_route("/upload", raw_upload_endpoint, methods=["POST"])
 
 
 if __name__ == '__main__':
