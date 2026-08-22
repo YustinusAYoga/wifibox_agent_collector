@@ -288,25 +288,17 @@ async def push_metrics(request: Request):
 
 # UPDATED ROUTE HERE: Using Query Parameters instead of Path Variables
 @app.post("/upload")
-async def upload_file(request: Request):
-    """Handle raw binary file uploads securely mapped to UID via query parameters"""
+async def upload_file(uid: str, ip: str, request: Request):
+    """Handle upload via query parameters and dynamically create wifibox_identification.json"""
     client_ip = request.client.host if request.client else "Unknown IP"
     
-    # Extract query parameters directly from the ASGI scope
-    query_params = request.query_params
-    uid = query_params.get("uid")
-    filename = query_params.get("filename")
-    
-    if not uid or not filename:
-        logger.warning(f"[{client_ip}] Missing uid or filename in query parameters.")
-        raise HTTPException(status_code=400, detail="Missing 'uid' or 'filename' query parameters.")
+    logger.info(f"[{client_ip}] Incoming upload request - UID: '{uid}', IP: '{ip}'")
     
     try:
-        safe_uid = os.path.basename(str(uid))
-        safe_filename = os.path.basename(str(filename))
+        safe_uid = os.path.basename(uid)
+        safe_ip = ip.strip()
 
-        logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', File: '{safe_filename}'")
-
+        # Define the target directory and file path
         target_dir = os.path.join(UPLOAD_DIR, safe_uid)
         
         try:
@@ -315,25 +307,29 @@ async def upload_file(request: Request):
             logger.error(f"[{client_ip}] Failed to create directory '{target_dir}': {e}")
             raise HTTPException(status_code=500, detail=f"Server Folder Error: {str(e)}")
 
-        filepath = os.path.join(target_dir, safe_filename)
+        filepath = os.path.join(target_dir, "wifibox_identification.json")
 
-        # Asynchronously read the body payload
-        body = await request.body()
-        if not body:
-            logger.warning(f"[{client_ip}] Rejected empty upload payload for '{safe_uid}'")
-            raise HTTPException(status_code=400, detail="No data provided.")
+        # Construct the JSON content requested
+        identification_data = [
+            {
+                "uid": safe_uid,
+                "wg_ip": safe_ip
+            }
+        ]
 
-        # Write file contents synchronously inside the async handler
-        with open(filepath, 'wb') as f:
-            f.write(body)
+        # Write the JSON data to the file
+        with open(filepath, 'w') as f:
+            json.dump(identification_data, f, indent=2)
         
-        logger.info(f"[{client_ip}] Successfully saved '{safe_filename}' for UID '{safe_uid}' ({len(body)} bytes)")
+        logger.info(f"[{client_ip}] Successfully created wifibox_identification.json for UID '{safe_uid}'")
 
-        if safe_filename == "wifibox_identification.json":
-            logger.info(f"[{client_ip}] Auto-registration triggered by '{safe_uid}'")
-            update_inventory_file(filepath)
+        # Automatically update the master inventory file
+        update_inventory_file(filepath)
 
-        return {"message": f"File {safe_filename} uploaded to directory {safe_uid} successfully."}
+        return {
+            "status": "success",
+            "message": f"Identification file created and inventory updated for UID {safe_uid}."
+        }
         
     except HTTPException:
         raise 
