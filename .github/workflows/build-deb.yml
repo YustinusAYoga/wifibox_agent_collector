@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - 'v*.*.*' # Triggers on version tags (e.g., v1.0.6)
+      - 'v*.*.*' # Triggers on version tags (e.g., v1.0.8)
   pull_request:
     branches:
       - main
@@ -27,9 +27,12 @@ jobs:
             set -ex
             export DEBIAN_FRONTEND=noninteractive
             
+            echo "Applying QEMU dpkg stability fix..."
+            mkdir -p /var/lib/dpkg/triggers
+            dpkg --configure -a || true
+            
             echo "Installing dependencies..."
             apt-get update
-            # Removed python3-pip to avoid QEMU dpkg crash, added --no-install-recommends
             apt-get install -y --no-install-recommends gcc python3-dev cython3 dpkg-dev fakeroot pkg-config dos2unix
             
             echo "Checking files present in the repository..."
