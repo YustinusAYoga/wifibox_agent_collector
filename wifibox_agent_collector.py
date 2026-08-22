@@ -287,39 +287,42 @@ async def push_metrics(request: Request):
         logger.error(f"Failed to process pushed metrics: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
+AD_DIR = "/home/oldendome/wifibox-agent/data/"
+
+# --- The Endpoint ---
 @app.post("/upload")
 async def raw_upload_endpoint(request: Request):
+    """
+    Handles identity registration via query parameters (?uid=...&ip=...)
+    Generates the JSON file locally.
+    """
     client_ip = request.client.host if request.client else "Unknown IP"
     
     try:
-        # Parse query string manually exactly as you wrote it
-        query_params = parse_qs(request.scope.get("query_string", b"").decode("utf-8"))
-        uid_vals = query_params.get("uid", [])
-        ip_vals = query_params.get("ip", [])
-        
-        uid = uid_vals[0] if uid_vals else None
-        ip = ip_vals[0] if ip_vals else None
+        # 1. Use FastAPI's native query_params parser (much cleaner than parse_qs!)
+        uid = request.query_params.get("uid")
+        ip = request.query_params.get("ip")
         
         if not uid or not ip:
             logger.warning(f"[{client_ip}] Missing 'uid' or 'ip' query parameters.")
             return JSONResponse({"detail": "Missing 'uid' or 'ip' query parameters."}, status_code=400)
         
+        # 2. Sanitize inputs
         safe_uid = os.path.basename(str(uid))
         safe_ip = str(ip).strip()
 
         logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', IP: '{safe_ip}'")
 
+        # 3. Create Target Directory safely
         target_dir = os.path.join(UPLOAD_DIR, safe_uid)
-        
-        # Catch Folder Permission Errors Specifically
         try:
             os.makedirs(target_dir, exist_ok=True)
         except Exception as e:
             logger.error(f"[{client_ip}] Failed to create directory '{target_dir}': {e}")
             return JSONResponse({"detail": f"Server Folder Error: {str(e)}"}, status_code=500)
 
+        # 4. Generate JSON Data locally on the server
         filepath = os.path.join(target_dir, "wifibox_identification.json")
-
         identification_data = [
             {
                 "uid": safe_uid,
@@ -327,14 +330,13 @@ async def raw_upload_endpoint(request: Request):
             }
         ]
 
-        # Generate and save the JSON file locally
         with open(filepath, 'w') as f:
             json.dump(identification_data, f, indent=2)
         
         logger.info(f"[{client_ip}] Successfully created wifibox_identification.json for UID '{safe_uid}'")
 
-        # Ensure update_inventory_file is defined elsewhere in your script!
-        # update_inventory_file(filepath) 
+        # 5. Trigger Inventory Registration
+        update_inventory_file(filepath)
 
         return JSONResponse({
             "status": "success",
