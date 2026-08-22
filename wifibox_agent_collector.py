@@ -9,12 +9,8 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import threading
-from urllib.parse import parse_qs
-
-# FastAPI & Uvicorn imports
-from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
-import uvicorn
+from urllib.parse import urlparse, parse_qs
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 # Prometheus imports
 from prometheus_client import generate_latest, Gauge, Counter, Info, CONTENT_TYPE_LATEST
@@ -82,7 +78,6 @@ PUSHED_DATA_DIR = "/home/oldendome/wifibox-agent-collector/pushed_backlogs"
 INVENTORY_FILE_PATH = "/home/oldendome/wifibox-agent-collector/wifibox_inventory.json"
 UPLOAD_DIR = "/home/oldendome/wifibox-agent/data"
 
-app = FastAPI(title="Wifibox Fleet Collector API")
 
 def init_storage():
     os.makedirs(os.path.dirname(CSV_FILE_PATH), exist_ok=True)
@@ -194,7 +189,6 @@ def parse_and_update_metrics(uid, site, mode, text_data, ip, collected_time):
     return rows
 
 def update_inventory_file(uploaded_file_path):
-    """Parses the uploaded wifibox_identification.json and updates the master inventory."""
     try:
         with open(uploaded_file_path, 'r') as f:
             new_data = json.load(f)
@@ -231,6 +225,114 @@ def update_inventory_file(uploaded_file_path):
     except Exception as e:
         logger.error(f"Failed to parse and update inventory: {e}")
 
+# --- Native HTTP Server (Replaces FastAPI to fix Cython conflicts) ---
+class CollectorHTTPHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        
+        if parsed_path.path == '/metrics':
+            output = generate_latest()
+            self.send_response(200)
+            self.send_header('Content-Type', CONTENT_TYPE_LATEST)
+            self.end_headers()
+            self.wfile.write(output)
+            
+        elif parsed_path.path in ['/csv', '/collected-meteric-data.csv']:
+            if os.path.exists(CSV_FILE_PATH):
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/csv')
+                self.end_headers()
+                with open(CSV_FILE_PATH, 'rb') as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"CSV file not found")
+                
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+
+    def do_POST(self):
+        parsed_path = urlparse(self.path)
+        client_ip = self.client_address[0]
+
+        # 1. Handle File Generation API
+        if parsed_path.path == '/upload':
+            params = parse_qs(parsed_path.query)
+            
+            uid = params.get("uid", [None])[0]
+            ip = params.get("ip", [None])[0]
+            
+            if not uid or not ip:
+                logger.warning(f"[{client_ip}] Missing 'uid' or 'ip' query parameters.")
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"error": "Missing uid or ip"}')
+                return
+                
+            try:
+                safe_uid = os.path.basename(str(uid))
+                safe_ip = str(ip).strip()
+
+                logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', IP: '{safe_ip}'")
+                target_dir = os.path.join(UPLOAD_DIR, safe_uid)
+                
+                os.makedirs(target_dir, exist_ok=True)
+                filepath = os.path.join(target_dir, "wifibox_identification.json")
+
+                identification_data = [{"uid": safe_uid, "wg_ip": safe_ip}]
+
+                with open(filepath, 'w') as f:
+                    json.dump(identification_data, f, indent=2)
+                
+                logger.info(f"[{client_ip}] Successfully created wifibox_identification.json for UID '{safe_uid}'")
+                update_inventory_file(filepath)
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"status": "success"}')
+                
+            except Exception as e:
+                logger.error(f"[{client_ip}] Error during upload processing: {e}")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b'{"error": "Internal Server Error"}')
+
+        # 2. Handle Prometheus Push Metrics
+        elif parsed_path.path.startswith('/metrics/job/'):
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup_file = os.path.join(PUSHED_DATA_DIR, f"pushed_{timestamp_str}.txt")
+            try:
+                with open(backup_file, 'wb') as f:
+                    f.write(post_data)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+            except Exception as e:
+                logger.error(f"Failed to process pushed metrics: {e}")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b"Internal Server Error")
+                
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+
+    def log_message(self, format, *args):
+        # Silence default http.server logging to keep journalctl clean
+        return
+
+def run_http_server(port):
+    server = ThreadingHTTPServer(('0.0.0.0', port), CollectorHTTPHandler)
+    server.serve_forever()
+
 # --- Background Scraper Loop ---
 def background_scraper():
     while True:
@@ -258,96 +360,6 @@ def background_scraper():
         time.sleep(sleep_duration)
 
 
-# --- FastAPI Endpoints ---
-
-@app.get("/metrics")
-def get_metrics():
-    """Expose metrics to Prometheus"""
-    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-@app.get("/csv")
-@app.get("/collected-meteric-data.csv")
-def get_csv():
-    """Download the generated CSV file"""
-    if os.path.exists(CSV_FILE_PATH):
-        return FileResponse(CSV_FILE_PATH, media_type='text/csv', filename="collected-meteric-data.csv")
-    raise HTTPException(status_code=404, detail="CSV file not found")
-
-@app.post("/metrics/job/{path:path}")
-async def push_metrics(request: Request):
-    """Handle Prometheus push metrics"""
-    body = await request.body()
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    backup_file = os.path.join(PUSHED_DATA_DIR, f"pushed_{timestamp_str}.txt")
-    try:
-        with open(backup_file, 'wb') as f:
-            f.write(body)
-        return {"status": "OK"}
-    except Exception as e:
-        logger.error(f"Failed to process pushed metrics: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-
-AD_DIR = "/home/oldendome/wifibox-agent/data/"
-
-# --- The Endpoint ---
-@app.post("/upload")
-async def raw_upload_endpoint(request: Request):
-    """
-    Handles identity registration via query parameters (?uid=...&ip=...)
-    Generates the JSON file locally.
-    """
-    client_ip = request.client.host if request.client else "Unknown IP"
-    
-    try:
-        # 1. Use FastAPI's native query_params parser (much cleaner than parse_qs!)
-        uid = request.query_params.get("uid")
-        ip = request.query_params.get("ip")
-        
-        if not uid or not ip:
-            logger.warning(f"[{client_ip}] Missing 'uid' or 'ip' query parameters.")
-            return JSONResponse({"detail": "Missing 'uid' or 'ip' query parameters."}, status_code=400)
-        
-        # 2. Sanitize inputs
-        safe_uid = os.path.basename(str(uid))
-        safe_ip = str(ip).strip()
-
-        logger.info(f"[{client_ip}] Incoming upload request - UID: '{safe_uid}', IP: '{safe_ip}'")
-
-        # 3. Create Target Directory safely
-        target_dir = os.path.join(UPLOAD_DIR, safe_uid)
-        try:
-            os.makedirs(target_dir, exist_ok=True)
-        except Exception as e:
-            logger.error(f"[{client_ip}] Failed to create directory '{target_dir}': {e}")
-            return JSONResponse({"detail": f"Server Folder Error: {str(e)}"}, status_code=500)
-
-        # 4. Generate JSON Data locally on the server
-        filepath = os.path.join(target_dir, "wifibox_identification.json")
-        identification_data = [
-            {
-                "uid": safe_uid,
-                "wg_ip": safe_ip
-            }
-        ]
-
-        with open(filepath, 'w') as f:
-            json.dump(identification_data, f, indent=2)
-        
-        logger.info(f"[{client_ip}] Successfully created wifibox_identification.json for UID '{safe_uid}'")
-
-        # 5. Trigger Inventory Registration
-        update_inventory_file(filepath)
-
-        return JSONResponse({
-            "status": "success",
-            "message": f"Identification file created and inventory updated for UID {safe_uid}."
-        })
-        
-    except Exception as e:
-        logger.error(f"[{client_ip}] Unexpected error during upload: {e}")
-        return JSONResponse({"detail": f"Unexpected Internal Server Error: {str(e)}"}, status_code=500)
-
-
 if __name__ == '__main__':
     init_storage()
     
@@ -356,8 +368,10 @@ if __name__ == '__main__':
     except FileNotFoundError:
         pass 
 
+    # Start Background Scraper
     scraper_thread = threading.Thread(target=background_scraper, daemon=True)
     scraper_thread.start()
 
+    # Start Native Python Web Server
     logger.info("Wifibox Fleet Collector & Server starting on 0.0.0.0:9102")
-    uvicorn.run(app, host="0.0.0.0", port=9102, log_level="info")
+    run_http_server(9102)
