@@ -287,11 +287,12 @@ async def push_metrics(request: Request):
         logger.error(f"Failed to process pushed metrics: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
-# --- Raw ASGI Route Handler (Bypasses FastAPI/Pydantic/Cython Signature Inspection) ---
+@app.post("/upload")
 async def raw_upload_endpoint(request: Request):
     client_ip = request.client.host if request.client else "Unknown IP"
     
     try:
+        # Parse query string manually exactly as you wrote it
         query_params = parse_qs(request.scope.get("query_string", b"").decode("utf-8"))
         uid_vals = query_params.get("uid", [])
         ip_vals = query_params.get("ip", [])
@@ -310,6 +311,7 @@ async def raw_upload_endpoint(request: Request):
 
         target_dir = os.path.join(UPLOAD_DIR, safe_uid)
         
+        # Catch Folder Permission Errors Specifically
         try:
             os.makedirs(target_dir, exist_ok=True)
         except Exception as e:
@@ -325,12 +327,14 @@ async def raw_upload_endpoint(request: Request):
             }
         ]
 
+        # Generate and save the JSON file locally
         with open(filepath, 'w') as f:
             json.dump(identification_data, f, indent=2)
         
         logger.info(f"[{client_ip}] Successfully created wifibox_identification.json for UID '{safe_uid}'")
 
-        update_inventory_file(filepath)
+        # Ensure update_inventory_file is defined elsewhere in your script!
+        # update_inventory_file(filepath) 
 
         return JSONResponse({
             "status": "success",
@@ -340,9 +344,6 @@ async def raw_upload_endpoint(request: Request):
     except Exception as e:
         logger.error(f"[{client_ip}] Unexpected error during upload: {e}")
         return JSONResponse({"detail": f"Unexpected Internal Server Error: {str(e)}"}, status_code=500)
-
-# Register as a raw Starlette route to avoid any FastAPI dependency inspector overhead
-app.add_route("/upload", raw_upload_endpoint, methods=["POST"])
 
 
 if __name__ == '__main__':
